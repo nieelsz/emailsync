@@ -3,7 +3,12 @@ from tkinter import ttk
 from tkinter import messagebox
 import imaplib
 import email
+import email.utils
 import ssl
+import datetime
+import pytz
+import threading  # Biblioteca para threading
+from time import sleep  # Para pausar entre as tentativas de reconexão
 
 class EmailSyncApp(ttk.Frame):
     def __init__(self, parent):
@@ -92,7 +97,7 @@ class EmailSyncApp(ttk.Frame):
         self.combo_theme.bind("<<ComboboxSelected>>", self.change_theme)
 
         # Botão de Sincronização
-        self.sync_button = ttk.Button(self.main_frame, text="Sincronizar", command=self.sync_emails, style="Accent.TButton")
+        self.sync_button = ttk.Button(self.main_frame, text="Sincronizar", command=self.start_sync_thread, style="Accent.TButton")
         self.sync_button.grid(row=3, column=0, padx=10, pady=10, sticky="nsew")
 
         # Barra de progresso
@@ -100,6 +105,10 @@ class EmailSyncApp(ttk.Frame):
         self.progress_frame.grid(row=4, column=0, padx=5, pady=5, sticky="nsew")
         self.progress = ttk.Progressbar(self.progress_frame, orient="horizontal", length=400, mode="determinate")
         self.progress.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+
+        # Label para mostrar o número de e-mails restantes
+        self.remaining_emails_label = ttk.Label(self.progress_frame, text="E-mails restantes: 0")
+        self.remaining_emails_label.grid(row=1, column=0, padx=5, pady=5, sticky="ew")
 
         # Frame para as informações do criador, posicionado à direita
         self.creator_frame = ttk.Frame(self)
@@ -123,6 +132,11 @@ class EmailSyncApp(ttk.Frame):
         selected_theme = self.theme_choice.get()
         self.master.tk.call("set_theme", selected_theme)
 
+    def start_sync_thread(self):
+        # Inicia a sincronização em um novo thread
+        sync_thread = threading.Thread(target=self.sync_emails)
+        sync_thread.start()
+
     def sync_emails(self):
         orig_host = self.server_source.get()
         orig_port = int(self.port_source.get())
@@ -138,27 +152,11 @@ class EmailSyncApp(ttk.Frame):
 
         try:
             # Conectar ao servidor de origem
-            if orig_security == "SSL":
-                orig_conn = imaplib.IMAP4_SSL(orig_host, orig_port)
-            elif orig_security == "TLS":
-                orig_conn = imaplib.IMAP4(orig_host, orig_port)
-                orig_conn.starttls()
-            else:
-                orig_conn = imaplib.IMAP4(orig_host, orig_port)
-
-            orig_conn.login(orig_user, orig_pass)
+            orig_conn = self.connect_to_server(orig_host, orig_port, orig_security, orig_user, orig_pass)
             orig_conn.select('inbox')
 
             # Conectar ao servidor de destino
-            if dest_security == "SSL":
-                dest_conn = imaplib.IMAP4_SSL(dest_host, dest_port)
-            elif dest_security == "TLS":
-                dest_conn = imaplib.IMAP4(dest_host, dest_port)
-                dest_conn.starttls()
-            else:
-                dest_conn = imaplib.IMAP4(dest_host, dest_port)
-
-            dest_conn.login(dest_user, dest_pass)
+            dest_conn = self.connect_to_server(dest_host, dest_port, dest_security, dest_user, dest_pass)
             dest_conn.select('inbox')
 
             # Buscar todos os e-mails na caixa de entrada
@@ -166,19 +164,55 @@ class EmailSyncApp(ttk.Frame):
             messages = messages[0].split()
             total_messages = len(messages)
 
-            # Configurar a barra de progresso
+            # Configurar a barra de progresso e a label de e-mails restantes
             self.progress["maximum"] = total_messages
+            self.update_remaining_emails(total_messages)
 
             for index, msg_id in enumerate(messages):
-                status, msg_data = orig_conn.fetch(msg_id, '(RFC822)')
-                raw_email = msg_data[0][1]
+                try:
+                    status, msg_data = orig_conn.fetch(msg_id, '(RFC822)')
+                    raw_email = msg_data[0][1]
 
-                # Fazer o upload do e-mail para o servidor de destino
-                dest_conn.append('inbox', '', imaplib.Time2Internaldate(email.utils.parsedate_to_datetime(email.message_from_bytes(raw_email)['Date'])), raw_email)
+                    # Extrair o e-mail como objeto de mensagem
+                    msg = email.message_from_bytes(raw_email)
 
-                # Atualizar a barra de progresso
-                self.progress["value"] = index + 1
-                self.parent.update_idletasks()
+                    # Tentar obter e converter a data, se disponível
+                    date_header = msg['Date']
+                    if date_header:
+                        try:
+                            date_tuple = email.utils.parsedate_to_datetime(date_header)
+                            if date_tuple.tzinfo is None:  # Se não houver informação de fuso horário
+                                date_tuple = date_tuple.replace(tzinfo=pytz.UTC)  # Define UTC como padrão
+                        except Exception as e:
+                            date_tuple = None
+                    else:
+                        date_tuple = None
+
+                    # Se a data estiver ausente ou inválida, use a data atual com timezone
+                    if date_tuple is None:
+                        date_tuple = datetime.datetime.now(pytz.UTC)
+
+                    # Fazer o upload do e-mail para o servidor de destino
+                    dest_conn.append('inbox', '', imaplib.Time2Internaldate(date_tuple), raw_email)
+
+                    # Atualizar a barra de progresso
+                    self.progress["value"] = index + 1
+                    self.update_remaining_emails(total_messages - (index + 1))
+                    self.parent.update_idletasks()
+
+                except imaplib.IMAP4.abort:
+                    # Tentativa de reconectar ao servidor de origem
+                    orig_conn = self.connect_to_server(orig_host, orig_port, orig_security, orig_user, orig_pass)
+                    orig_conn.select('inbox')
+
+                    # Tentativa de reconectar ao servidor de destino
+                    dest_conn = self.connect_to_server(dest_host, dest_port, dest_security, dest_user, dest_pass)
+                    dest_conn.select('inbox')
+
+                    # Retentar a operação para o email atual
+                    status, msg_data = orig_conn.fetch(msg_id, '(RFC822)')
+                    raw_email = msg_data[0][1]
+                    dest_conn.append('inbox', '', imaplib.Time2Internaldate(date_tuple), raw_email)
 
             orig_conn.logout()
             dest_conn.logout()
@@ -186,6 +220,31 @@ class EmailSyncApp(ttk.Frame):
             messagebox.showinfo("Sucesso", "Sincronização concluída!")
         except Exception as e:
             messagebox.showerror("Erro", str(e))
+
+    def connect_to_server(self, host, port, security, user, password):
+        conn = None
+        retry_count = 3
+        while retry_count > 0:
+            try:
+                if security == "SSL":
+                    conn = imaplib.IMAP4_SSL(host, port)
+                elif security == "TLS":
+                    conn = imaplib.IMAP4(host, port)
+                    conn.starttls()
+                else:
+                    conn = imaplib.IMAP4(host, port)
+
+                conn.login(user, password)
+                break
+            except imaplib.IMAP4.error as e:
+                retry_count -= 1
+                sleep(5)  # Espera 5 segundos antes de tentar novamente
+                if retry_count == 0:
+                    raise e
+        return conn
+
+    def update_remaining_emails(self, remaining):
+        self.remaining_emails_label.config(text=f"E-mails restantes: {remaining}")
 
 if __name__ == "__main__":
     root = tk.Tk()
