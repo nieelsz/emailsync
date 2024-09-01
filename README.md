@@ -19,7 +19,8 @@ O **Email Sync App** é um aplicativo em Python que permite sincronizar e-mails 
 ## Requisitos
 
 - **Python 3.x**
-- **Bibliotecas Padrão:** `tkinter`, `imaplib`, `email`, `ssl` (todas essas são bibliotecas padrão do Python e não precisam ser instaladas separadamente).
+- **Bibliotecas** `pytz` e `pandas`.
+- Tema: azurettk, opcional.
 
 ## Instalação
 
@@ -27,6 +28,10 @@ O **Email Sync App** é um aplicativo em Python que permite sincronizar e-mails 
    ```bash
    git clone https://github.com/nieelsz/emailsync.git
    cd emailsync
+
+2. **Bibliotecas:**
+   ```bash
+   pip install pytz pandas
 
 ## Problemas Conhecidos
 Grandes Volumes de E-mails: A sincronização de caixas de e-mails muito grandes (e.g., 40 GB) pode demorar bastante e consumir muitos recursos. Recomenda-se executar a sincronização em partes.
